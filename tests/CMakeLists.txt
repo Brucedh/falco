@@ -18,7 +18,6 @@ if(MINIMAL_BUILD)
   set(
     FALCO_TESTS_SOURCES
     test_base.cpp
-    engine/test_rulesets.cpp
     engine/test_falco_utils.cpp
     engine/test_filter_macro_resolver.cpp
     falco/test_configuration.cpp
@@ -27,7 +26,6 @@ else()
   set(
     FALCO_TESTS_SOURCES
     test_base.cpp
-    engine/test_rulesets.cpp
     engine/test_falco_utils.cpp
     engine/test_filter_macro_resolver.cpp
     falco/test_configuration.cpp

@@ -52,21 +52,6 @@ static void paren_item(std::string& e)
 	}
 }
 
-static bool is_field_defined(falco_engine *engine, string source, string field)
-{
-	auto factory = engine->get_filter_factory(source);
-	if(factory)
-	{
-		auto *chk = factory->new_filtercheck(field.c_str());
-		if (chk)
-		{
-			delete(chk);
-			return true;
-		}
-	}
-	return false;
-}
-
 // todo(jasondellaluce): add an helper in libsinsp for this
 static bool is_operator_defined(std::string op)
 {
@@ -82,13 +67,12 @@ static bool is_operator_for_list(std::string op)
 	return op == "in" || op == "intersects" || op == "pmatch";
 }
 
-static bool is_format_valid(
-	falco_engine* e, string src, string fmt, string& err)
+static bool is_format_valid(const falco_source& source, string fmt, string& err)
 {
 	try
 	{
 		shared_ptr<gen_event_formatter> formatter;
-		formatter = e->create_formatter(src, fmt);
+		formatter = source.formatter_factory->create_formatter(fmt);
 		return true;
 	}
 	catch(exception &e)
@@ -281,29 +265,6 @@ static shared_ptr<ast::expr> parse_condition(string cnd,
 	}
 }
 
-static shared_ptr<gen_event_filter> compile_condition(
-		falco_engine* engine, uint32_t id, shared_ptr<ast::expr> cnd,
-		string src, string& err)
-{
-	try
-	{
-		auto factory = engine->get_filter_factory(src);
-		sinsp_filter_compiler compiler(factory, cnd.get());
-		compiler.set_check_id(id);
-		shared_ptr<gen_event_filter> ret(compiler.compile());
-		return ret;
-	}
-	catch (const sinsp_exception& e)
-	{
-		err = e.what();
-	}
-	catch (const falco_exception& e)
-	{
-		err = e.what();
-	}
-	return nullptr;
-}
-
 static void define_info(indexed_vector<YAML::Node>& infos,
 	YAML::Node& item, string name, uint32_t id)
 {
@@ -330,7 +291,8 @@ static void append_infos(YAML::Node& item, YAML::Node& append, uint32_t id)
 }
 
 static void validate_rule_exception(
-		falco_engine* engine, YAML::Node& ex, string source)
+		const falco_source& source,
+		YAML::Node& ex)
 {
 	switch (ex["fields"].Type())
 	{
@@ -346,8 +308,7 @@ static void validate_rule_exception(
 					"Rule exception item " + ex["name"].as<string>() 
 						+ ": fields and comps must both be strings");
 			}
-			THROW(!is_field_defined(
-					engine, source, ex["fields"].as<string>()),
+			THROW(!source.is_field_defined(ex["fields"].as<string>()),
 				"Rule exception item " + ex["name"].as<string>()
 					+ ": field name " + ex["fields"].as<string>()
 					+ " is not a supported filter field");
@@ -376,7 +337,7 @@ static void validate_rule_exception(
 				THROW(!yaml_is_type<string>(field),
 					"Rule exception item " + ex["name"].as<string>()
 						+ ": fields must strings ");
-				THROW(!is_field_defined(engine, source, field.as<string>()),
+				THROW(!source.is_field_defined(field.as<string>()),
 					"Rule exception item " + ex["name"].as<string>()
 						+ ": field name " + field.as<string>()
 						+ " is not a supported filter field");
@@ -548,19 +509,25 @@ void rule_loader::apply_output_substitutions(std::string& out)
 	out += m_extra.empty() ? "" : " " + m_extra;
 }
 
-bool rule_loader::load(const string &content, falco_engine* engine,
-		vector<string>& warnings, vector<string>& errors)
+bool rule_loader::load(
+	const string &content,
+	const indexed_vector<falco_source>& sources,
+	vector<string>& warnings,
+	vector<string>& errors)
 {
-	if (read(content, engine, warnings, errors))
+	if (read(content, sources, warnings, errors))
 	{
 		m_rules.clear();
-		engine->clear_filters();
-		return expand(engine, warnings, errors);
+		for (auto &s : sources)
+		{
+			s.ruleset->clear();
+		}
+		return expand(sources, warnings, errors);
 	}
 	return false;
 }
 
-bool rule_loader::read(const string &content, falco_engine* engine,
+bool rule_loader::read(const string &content, const indexed_vector<falco_source>& sources,
 		vector<string>& warnings, vector<string>& errors)
 {
 	std::vector<YAML::Node> docs;
@@ -599,7 +566,7 @@ bool rule_loader::read(const string &content, falco_engine* engine,
 						THROW(!item.IsMap(), "Unexpected element type. "
 							"Each element should be a yaml associative array.");
 						item["context"] = ctx;
-						read_item(engine, item, warnings);
+						read_item(sources, item, warnings);
 					}
 					catch(const exception& e)
 					{
@@ -614,27 +581,29 @@ bool rule_loader::read(const string &content, falco_engine* engine,
 }
 
 void rule_loader::read_item(
-	falco_engine* engine, YAML::Node& item, vector<string>& warnings)
+	const indexed_vector<falco_source>& sources,
+	YAML::Node& item,
+	vector<string>& warnings)
 {
 	if (item["required_engine_version"].IsDefined())
 	{
-		read_required_engine_version(engine, item, warnings);
+		read_required_engine_version(sources, item, warnings);
 	}
 	else if(item["required_plugin_versions"].IsDefined())
 	{
-		read_required_plugin_versions(engine, item, warnings);
+		read_required_plugin_versions(sources, item, warnings);
 	}
 	else if(item["macro"].IsDefined())
 	{
-		read_macro(engine, item, warnings);
+		read_macro(sources, item, warnings);
 	}
 	else if(item["list"].IsDefined())
 	{
-		read_list(engine, item, warnings);
+		read_list(sources, item, warnings);
 	}
 	else if(item["rule"].IsDefined())
 	{
-		read_rule(engine, item, warnings);
+		read_rule(sources, item, warnings);
 	}
 	else
 	{
@@ -643,7 +612,7 @@ void rule_loader::read_item(
 }
 
 void rule_loader::read_required_engine_version(
-	falco_engine* engine, YAML::Node& item, vector<string>& warnings)
+	const indexed_vector<falco_source>& sources, YAML::Node& item, vector<string>& warnings)
 {
 	uint32_t v = 0;
 	THROW(!YAML::convert<uint32_t>::decode(item["required_engine_version"], v),
@@ -654,7 +623,7 @@ void rule_loader::read_required_engine_version(
 }
 
 void rule_loader::read_required_plugin_versions(
-	falco_engine* engine, YAML::Node& item, vector<string>& warnings)
+	const indexed_vector<falco_source>& sources, YAML::Node& item, vector<string>& warnings)
 {
 	string name, ver;
 	THROW(!item["required_plugin_versions"].IsSequence(),
@@ -674,7 +643,7 @@ void rule_loader::read_required_plugin_versions(
 }
 
 void rule_loader::read_list(
-	falco_engine* engine, YAML::Node& item, vector<string>& warnings)
+	const indexed_vector<falco_source>& sources, YAML::Node& item, vector<string>& warnings)
 {
 	string name;
 	THROW(!YAML::convert<string>::decode(item["list"], name) || name.empty(),
@@ -699,7 +668,7 @@ void rule_loader::read_list(
 }
 
 void rule_loader::read_macro(
-	falco_engine* engine, YAML::Node& item, vector<string>& warnings)
+	const indexed_vector<falco_source>& sources, YAML::Node& item, vector<string>& warnings)
 {
 	string name, cnd;
 	THROW(!YAML::convert<string>::decode(item["macro"], name) || name.empty(),
@@ -715,7 +684,8 @@ void rule_loader::read_macro(
 	{
 		item["source"] = falco_common::syscall_source;
 	}
-	if (!engine->is_source_valid(item["source"].as<string>()))
+	auto source = sources.at(item["source"].as<string>());
+	if (!source)
 	{
 		warnings.push_back("Macro " + name
 			+ ": warning (unknown-source): unknown source "
@@ -736,7 +706,7 @@ void rule_loader::read_macro(
 }
 
 void rule_loader::read_rule(
-	falco_engine* engine, YAML::Node& item, vector<string>& warnings)
+	const indexed_vector<falco_source>& sources, YAML::Node& item, vector<string>& warnings)
 {
 	string name;
 	falco_common::priority_type priority;
@@ -763,7 +733,8 @@ void rule_loader::read_rule(
 	{
 		item["source"] = falco_common::syscall_source;
 	}
-	if (!engine->is_source_valid(item["source"].as<string>()))
+	auto source = sources.at(item["source"].as<string>());
+	if (!source)
 	{
 		warnings.push_back("Rule " + name
 			+ ": warning (unknown-source): unknown source "
@@ -782,7 +753,7 @@ void rule_loader::read_rule(
 
 		if (item["exceptions"].IsDefined())
 		{
-			read_rule_exceptions(engine, item, true);
+			read_rule_exceptions(*source, item, true);
 		}
 
 		if (item["condition"].IsDefined())
@@ -823,14 +794,14 @@ void rule_loader::read_rule(
 
 	if (item["exceptions"].IsDefined())
 	{
-		read_rule_exceptions(engine, item, false);
+		read_rule_exceptions(*source, item, false);
 	}
    
 	define_info(m_rule_infos, item, name, m_cur_index++);
 }
 
 void rule_loader::read_rule_exceptions(
-		falco_engine* engine, YAML::Node& item, bool append)
+		const falco_source& source, YAML::Node& item, bool append)
 {
 	string exname;
 	string rule = item["rule"].as<string>();
@@ -866,7 +837,7 @@ void rule_loader::read_rule_exceptions(
 				THROW(!ex["values"].IsDefined(),
 					"Rule exception new item " + exname
 						+ ": must have fields property with a list of values");
-				validate_rule_exception(engine, ex, item["source"].as<string>());
+				validate_rule_exception(source, ex);
 				(*prev)["exceptions"].push_back(ex);
 			}
 			else
@@ -886,12 +857,12 @@ void rule_loader::read_rule_exceptions(
 			THROW(!ex["fields"].IsDefined(),
 				"Rule exception item " + exname
 					+ ": must have fields property with a list of fields");
-			validate_rule_exception(engine, ex, item["source"].as<string>());
+			validate_rule_exception(source, ex);
 		}
 	}
 }
 
-bool rule_loader::expand(falco_engine* engine,
+bool rule_loader::expand(const indexed_vector<falco_source>& sources,
 		vector<std::string>& warnings, vector<std::string>& errors)
 {
 	indexed_vector<YAML::Node> lists;
@@ -904,7 +875,7 @@ bool rule_loader::expand(falco_engine* engine,
 	{
 		expand_list_infos(used_lists, lists);
 		expand_macro_infos(lists, used_lists, used_macros, macros);
-		expand_rule_infos(engine, lists, macros, used_lists, used_macros, warnings);
+		expand_rule_infos(sources, lists, macros, used_lists, used_macros, warnings);
 	}
 	catch (exception& e)
 	{
@@ -1012,7 +983,7 @@ void rule_loader::expand_macro_infos(
 }
 
 void rule_loader::expand_rule_infos(
-	falco_engine* engine,
+	const indexed_vector<falco_source>& sources,
 	const indexed_vector<YAML::Node>& lists,
 	const indexed_vector<macro_node>& macros,
 	map<string, bool>& used_lists,
@@ -1029,6 +1000,11 @@ void rule_loader::expand_rule_infos(
 			{
 				continue;
 			}
+
+			auto source = sources.at(r["source"].as<string>());
+			THROW(!source, "Rule " + r["rule"].as<string>()
+				+ ": warning (unknown-source): unknown source "
+				+ r["source"].as<string>());
 		
 			set<string> exception_fields;
 			string condition = r["condition"].as<string>();
@@ -1048,7 +1024,7 @@ void rule_loader::expand_rule_infos(
 				apply_output_substitutions(output);
 			}
 
-			THROW(!is_format_valid(engine, r["source"].as<string>(), output, err), 
+			THROW(!is_format_valid(*source, output, err), 
 				"Invalid output format '" + output + "': '" + err + "'");
 			
 			falco_rule rule;
@@ -1060,11 +1036,18 @@ void rule_loader::expand_rule_infos(
 			rule.exception_fields = exception_fields;
 			yaml_decode_seq<string>(r["tags"], rule.tags);
 
-			// note: indexes are 0-based, but 0 is not an acceptable rule_id
-			auto rule_id = m_rules.insert(rule, rule.name) + 1;
-			auto filter = compile_condition(engine, rule_id, ast, rule.source, err);
-			if (!filter)
+			try
 			{
+				auto rule_id = m_rules.insert(rule, rule.name);
+				m_rules.at(rule.name)->id = rule_id;
+				rule.id = rule_id;
+				source->ruleset->add(rule, ast);
+				source->ruleset->enable(rule.name, false, r["enabled"].as<bool>());
+			}
+			catch (falco_exception& e)
+			{
+				printf("err: %s\n", e.what());
+				string err = e.what();
 				if (r["skip-if-unknown-filter"].as<bool>()
 					&& err.find("nonexistent field") != string::npos)
 				{
@@ -1077,20 +1060,19 @@ void rule_loader::expand_rule_infos(
 					throw falco_exception("Rule " + rule.name + ": error " + err);
 				}
 			}
-			engine->add_filter(filter, rule.name, rule.source, rule.tags);
 			if (rule.source == falco_common::syscall_source
 				&& r["warn_evttypes"].as<bool>())
 			{
-				auto evttypes = filter->evttypes();
-				if (evttypes.size() == 0 || evttypes.size() > 100)
-				{
-					warnings.push_back(
-						"Rule " + rule.name + ": warning (no-evttype):\n" +
-						+ "		 matches too many evt.type values.\n"
-						+ "		 This has a significant performance penalty.");
-				}
+				// todo: update this once we have merged https://github.com/falcosecurity/falco/pull/1965
+				// auto evttypes = filter->evttypes();
+				// if (evttypes.size() == 0 || evttypes.size() > 100)
+				// {
+				// 	warnings.push_back(
+				// 		"Rule " + rule.name + ": warning (no-evttype):\n" +
+				// 		+ "		 matches too many evt.type values.\n"
+				// 		+ "		 This has a significant performance penalty.");
+				// }
 			}
-			engine->enable_rule(rule.name, r["enabled"].as<bool>());
 		}
 		catch (exception& e)
 		{

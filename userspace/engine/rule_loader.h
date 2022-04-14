@@ -21,6 +21,7 @@ limitations under the License.
 #include <vector>
 #include <yaml-cpp/yaml.h>
 #include "falco_rule.h"
+#include "falco_source.h"
 #include "indexed_vector.h"
 
 // todo(jasondellaluce): remove this cyclic dependency
@@ -78,14 +79,14 @@ public:
 		rules, plugin version requirements, etc...) gets updated at each
 		invocation of the load() method.
 		\param content The contents of the ruleset
-		\param engine The instance of falco_engine used to add rule filters
+		\param sources A collection of falco sources to add filters into
 		\param warnings Filled-out with warnings
 		\param warnings Filled-out with errors
 		\return true if the ruleset content is loaded successfully
 	*/
 	virtual bool load(
 		const std::string& content,
-		falco_engine* engine,
+		const indexed_vector<falco_source>& sources,
 		std::vector<std::string>& warnings,
 		std::vector<std::string>& errors);
 
@@ -96,24 +97,42 @@ private:
 	> macro_node;
 
 	bool read(
-		const std::string& content, falco_engine* engine,
-		std::vector<std::string>& warnings, std::vector<std::string>& errors);
+		const std::string& content,
+		const indexed_vector<falco_source>& sources,
+		std::vector<std::string>& warnings,
+		std::vector<std::string>& errors);
 	void read_item(
-		falco_engine* engine, YAML::Node& item, vector<string>& warnings);
+		const indexed_vector<falco_source>& sources,
+		YAML::Node& item,
+		vector<string>& warnings);
 	void read_required_engine_version(
-		falco_engine* engine, YAML::Node& item, vector<string>& warnings);
+		const indexed_vector<falco_source>& sources,
+		YAML::Node& item,
+		vector<string>& warnings);
 	void read_required_plugin_versions(
-		falco_engine* engine, YAML::Node& item, vector<string>& warnings);
+		const indexed_vector<falco_source>& sources,
+		YAML::Node& item,
+		vector<string>& warnings);
 	void read_macro(
-		falco_engine* engine, YAML::Node& item, vector<string>& warnings);
+		const indexed_vector<falco_source>& sources,
+		YAML::Node& item,
+		vector<string>& warnings);
 	void read_list(
-		falco_engine* engine, YAML::Node& item, vector<string>& warnings);
+		const indexed_vector<falco_source>& sources,
+		YAML::Node& item,
+		vector<string>& warnings);
 	void read_rule(
-		falco_engine* engine, YAML::Node& item, vector<string>& warnings);
+		const indexed_vector<falco_source>& sources,
+		YAML::Node& item,
+		vector<string>& warnings);
 	void read_rule_exceptions(
-		falco_engine* engine, YAML::Node& item, bool append);
-	bool expand(falco_engine* engine,
-		std::vector<std::string>& warnings, std::vector<std::string>& errors);
+		const falco_source& source,
+		YAML::Node& item,
+		bool append);
+	bool expand(
+		const indexed_vector<falco_source>& sources,
+		std::vector<std::string>& warnings,
+		std::vector<std::string>& errors);
 	void expand_list_infos(
 		std::map<string, bool>& used, indexed_vector<YAML::Node>& out);
 	void expand_macro_infos(
@@ -122,7 +141,7 @@ private:
 		std::map<string, bool>& used_macros,
 		indexed_vector<macro_node>& out);
 	void expand_rule_infos(
-		falco_engine* engine,
+		const indexed_vector<falco_source>& sources,
 		const indexed_vector<YAML::Node>& lists,
 		const indexed_vector<macro_node>& macros,
 		std::map<string, bool>& used_lists,
