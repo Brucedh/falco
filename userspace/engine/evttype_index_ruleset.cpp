@@ -14,30 +14,31 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#include "ruleset.h"
+#include "evttype_index_ruleset.h"
 #include "banned.h" // This raises a compilation error when certain functions are used
 
 #include <algorithm>
 
 using namespace std;
 
-falco_ruleset::falco_ruleset()
+evttype_index_ruleset::evttype_index_ruleset(
+	std::shared_ptr<gen_event_filter_factory> f): m_filter_factory(f)
 {
 }
 
-falco_ruleset::~falco_ruleset()
+evttype_index_ruleset::~evttype_index_ruleset()
 {
 }
 
-falco_ruleset::ruleset_filters::ruleset_filters()
+evttype_index_ruleset::ruleset_filters::ruleset_filters()
 {
 }
 
-falco_ruleset::ruleset_filters::~ruleset_filters()
+evttype_index_ruleset::ruleset_filters::~ruleset_filters()
 {
 }
 
-void falco_ruleset::ruleset_filters::add_wrapper_to_list(filter_wrapper_list &wrappers, std::shared_ptr<filter_wrapper> wrap)
+void evttype_index_ruleset::ruleset_filters::add_wrapper_to_list(filter_wrapper_list &wrappers, std::shared_ptr<filter_wrapper> wrap)
 {
 	// This is O(n) but it's also uncommon
 	// (when loading rules only).
@@ -51,7 +52,7 @@ void falco_ruleset::ruleset_filters::add_wrapper_to_list(filter_wrapper_list &wr
 	}
 }
 
-void falco_ruleset::ruleset_filters::remove_wrapper_from_list(filter_wrapper_list &wrappers, std::shared_ptr<filter_wrapper> wrap)
+void evttype_index_ruleset::ruleset_filters::remove_wrapper_from_list(filter_wrapper_list &wrappers, std::shared_ptr<filter_wrapper> wrap)
 {
 	// This is O(n) but it's also uncommon
 	// (when loading rules only).
@@ -64,18 +65,16 @@ void falco_ruleset::ruleset_filters::remove_wrapper_from_list(filter_wrapper_lis
 	}
 }
 
-void falco_ruleset::ruleset_filters::add_filter(std::shared_ptr<filter_wrapper> wrap)
+void evttype_index_ruleset::ruleset_filters::add_filter(std::shared_ptr<filter_wrapper> wrap)
 {
-	std::set<uint16_t> fevttypes = wrap->evttypes();
-
-	if(fevttypes.empty())
+	if(wrap->evttypes.empty())
 	{
 		// Should run for all event types
 		add_wrapper_to_list(m_filter_all_event_types, wrap);
 	}
 	else
 	{
-		for(auto &etype : fevttypes)
+		for(auto &etype : wrap->evttypes)
 		{
 			if(m_filter_by_event_type.size() <= etype)
 			{
@@ -89,17 +88,15 @@ void falco_ruleset::ruleset_filters::add_filter(std::shared_ptr<filter_wrapper> 
 	m_filters.insert(wrap);
 }
 
-void falco_ruleset::ruleset_filters::remove_filter(std::shared_ptr<filter_wrapper> wrap)
+void evttype_index_ruleset::ruleset_filters::remove_filter(std::shared_ptr<filter_wrapper> wrap)
 {
-	std::set<uint16_t> fevttypes = wrap->evttypes();
-
-	if(fevttypes.empty())
+	if(wrap->evttypes.empty())
 	{
 		remove_wrapper_from_list(m_filter_all_event_types, wrap);
 	}
 	else
 	{
-		for(auto &etype : fevttypes)
+		for(auto &etype : wrap->evttypes)
 		{
 			if( etype < m_filter_by_event_type.size() )
 			{
@@ -111,12 +108,12 @@ void falco_ruleset::ruleset_filters::remove_filter(std::shared_ptr<filter_wrappe
 	m_filters.erase(wrap);
 }
 
-uint64_t falco_ruleset::ruleset_filters::num_filters()
+uint64_t evttype_index_ruleset::ruleset_filters::num_filters()
 {
 	return m_filters.size();
 }
 
-bool falco_ruleset::ruleset_filters::run(gen_event *evt)
+bool evttype_index_ruleset::ruleset_filters::run(gen_event *evt, falco_rule& match)
 {
     if(evt->get_type() < m_filter_by_event_type.size())
     {
@@ -124,6 +121,7 @@ bool falco_ruleset::ruleset_filters::run(gen_event *evt)
         {
             if(wrap->filter->run(evt))
             {
+				match = wrap->rule;
                 return true;
             }
         }
@@ -134,6 +132,7 @@ bool falco_ruleset::ruleset_filters::run(gen_event *evt)
 	{
 		if(wrap->filter->run(evt))
 		{
+			match = wrap->rule;
 			return true;
 		}
 	}
@@ -141,32 +140,64 @@ bool falco_ruleset::ruleset_filters::run(gen_event *evt)
 	return false;
 }
 
-void falco_ruleset::ruleset_filters::evttypes_for_ruleset(std::set<uint16_t> &evttypes)
+void evttype_index_ruleset::ruleset_filters::evttypes_for_ruleset(std::set<uint16_t> &evttypes)
 {
 	evttypes.clear();
 
 	for(auto &wrap : m_filters)
 	{
-		auto fevttypes = wrap->evttypes();
-		evttypes.insert(fevttypes.begin(), fevttypes.end());
+		evttypes.insert(wrap->evttypes.begin(), wrap->evttypes.end());
 	}
 }
 
-void falco_ruleset::add(string &source,
-			string &name,
-			set<string> &tags,
-			std::shared_ptr<gen_event_filter> filter)
+void evttype_index_ruleset::add(
+		const falco_rule& rule,
+		std::shared_ptr<libsinsp::filter::ast::expr> condition)
 {
-	std::shared_ptr<filter_wrapper> wrap(new filter_wrapper());
-	wrap->source = source;
-	wrap->name = name;
-	wrap->tags = tags;
-	wrap->filter = filter;
-
-	m_filters.insert(wrap);
+	try
+	{
+		sinsp_filter_compiler compiler(m_filter_factory, condition.get());
+		shared_ptr<gen_event_filter> filter(compiler.compile());
+		std::shared_ptr<filter_wrapper> wrap(new filter_wrapper());
+		wrap->rule = rule;
+		wrap->filter = filter;
+		 // todo: change this once we merge https://github.com/falcosecurity/falco/pull/1965
+		wrap->evttypes = filter->evttypes();
+		m_filters.insert(wrap);
+	}
+	catch (const sinsp_exception& e)
+	{
+		throw falco_exception(string(e.what()));
+	}
 }
 
-void falco_ruleset::enable(const string &substring, bool match_exact, bool enabled, uint16_t ruleset)
+uint16_t evttype_index_ruleset::ruleset_id(const std::string &name)
+{
+	auto it = find(m_ruleset_names.begin(), m_ruleset_names.end(), name);
+	if (it != m_ruleset_names.end())
+	{
+		return it - m_ruleset_names.begin();
+	}
+	m_ruleset_names.push_back(name);
+	return m_ruleset_names.size() - 1;
+}
+
+void evttype_index_ruleset::optimize(uint16_t ruleset)
+{
+	// nothing to do for now
+}
+
+void evttype_index_ruleset::clear()
+{
+	for (size_t i = 0; i < m_rulesets.size(); i++)
+	{
+		std::shared_ptr<ruleset_filters> r(new ruleset_filters());
+		m_rulesets[i] = r;
+	}
+	m_filters.clear();
+}
+
+void evttype_index_ruleset::enable(const string &substring, bool match_exact, bool enabled, uint16_t ruleset)
 {
 	while(m_rulesets.size() < (size_t)ruleset + 1)
 	{
@@ -179,14 +210,14 @@ void falco_ruleset::enable(const string &substring, bool match_exact, bool enabl
 
 		if(match_exact)
 		{
-			size_t pos = wrap->name.find(substring);
+			size_t pos = wrap->rule.name.find(substring);
 
 			matches = (substring == "" || (pos == 0 &&
-						       substring.size() == wrap->name.size()));
+						       substring.size() == wrap->rule.name.size()));
 		}
 		else
 		{
-			matches = (substring == "" || (wrap->name.find(substring) != string::npos));
+			matches = (substring == "" || (wrap->rule.name.find(substring) != string::npos));
 		}
 
 		if(matches)
@@ -203,7 +234,7 @@ void falco_ruleset::enable(const string &substring, bool match_exact, bool enabl
 	}
 }
 
-void falco_ruleset::enable_tags(const set<string> &tags, bool enabled, uint16_t ruleset)
+void evttype_index_ruleset::enable_tags(const set<string> &tags, bool enabled, uint16_t ruleset)
 {
 	while(m_rulesets.size() < (size_t)ruleset + 1)
 	{
@@ -215,7 +246,7 @@ void falco_ruleset::enable_tags(const set<string> &tags, bool enabled, uint16_t 
 		std::set<string> intersect;
 
 		set_intersection(tags.begin(), tags.end(),
-				 wrap->tags.begin(), wrap->tags.end(),
+				 wrap->rule.tags.begin(), wrap->rule.tags.end(),
 				 inserter(intersect, intersect.begin()));
 
 		if(!intersect.empty())
@@ -232,7 +263,7 @@ void falco_ruleset::enable_tags(const set<string> &tags, bool enabled, uint16_t 
 	}
 }
 
-uint64_t falco_ruleset::num_rules_for_ruleset(uint16_t ruleset)
+uint64_t evttype_index_ruleset::enabled_count(uint16_t ruleset)
 {
 	while(m_rulesets.size() < (size_t)ruleset + 1)
 	{
@@ -242,17 +273,17 @@ uint64_t falco_ruleset::num_rules_for_ruleset(uint16_t ruleset)
 	return m_rulesets[ruleset]->num_filters();
 }
 
-bool falco_ruleset::run(gen_event *evt, uint16_t ruleset)
+bool evttype_index_ruleset::run(gen_event *evt, falco_rule& match, uint16_t ruleset)
 {
 	if(m_rulesets.size() < (size_t)ruleset + 1)
 	{
 		return false;
 	}
 
-	return m_rulesets[ruleset]->run(evt);
+	return m_rulesets[ruleset]->run(evt, match);
 }
 
-void falco_ruleset::evttypes_for_ruleset(set<uint16_t> &evttypes, uint16_t ruleset)
+void evttype_index_ruleset::enabled_evttypes(set<uint16_t> &evttypes, uint16_t ruleset)
 {
 	if(m_rulesets.size() < (size_t)ruleset + 1)
 	{
